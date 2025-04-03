@@ -6,7 +6,7 @@ params.R1_FASTQ         = null
 params.R2_FASTQ         = null
 params.outdir           = "./results"
 params.ref_genome       = "/mnt/mohammadi/home/kganapathy/cloudasm_data/hg19/reference/"
-params.threads_bismark  = 4
+params.threads_bismark  = 6
 params.threads_samtools = 16
 params.sample_id        = "sample1"
 params.TMP_DIR          = "/mnt/mohammadi/home/kganapathy/cache_pac/tmp/"
@@ -49,19 +49,10 @@ workflow {
     }
 
     fastq_pair = Channel.of([file(params.R1_FASTQ), file(params.R2_FASTQ)])
-
     trimmed       = trimAdapters(fastq_pair)
-    sharded       = shardFastq(trimmed)
-    aligned_bams  = alignShard(sharded)
-
-    aligned_bams
-        .collect()
-        .map { bams -> tuple("all", bams) }
-        .set { all_bams }
-
-    merged_bam  = mergeBams(all_bams)
-    sorted_bam  = sortAndIndex(merged_bam)
-
+    aligned_bam   = align(trimmed)
+    sorted_bam    = sortAndIndex(aligned_bam)
+    
     // chr1
     chr1_split(sorted_bam)       | set { chr1_bam }
     chr1_RG(chr1_bam)            | set { chr1_rg_bam_bai }
@@ -257,43 +248,20 @@ process trimAdapters {
     """
 }
 
-process shardFastq {
-    tag "${R1.getBaseName()}"
+
+
+process align {
+    tag { r1.getBaseName() }
 
     input:
-    tuple path(R1), path(R2)
+    tuple path(r1), path(r2)
 
     output:
-    tuple val("shards"), path("shard_*.R1.fastq.gz"), path("shard_*.R2.fastq.gz")
+    path("aligned.bam")
 
-    script:
-    return """
-    mkdir -p shards
-
-    gunzip -c ${R1} | split -d -l 1200000 - shards/R1_
-    gunzip -c ${R2} | split -d -l 1200000 - shards/R2_
-
-    for i in shards/R1_*; do
-        idx=\$(basename \$i | cut -d'_' -f2)
-        gzip -c \$i > shard_\${idx}.R1.fastq.gz
-    done
-
-    for i in shards/R2_*; do
-        idx=\$(basename \$i | cut -d'_' -f2)
-        gzip -c \$i > shard_\${idx}.R2.fastq.gz
-    done
-    """
-}
-
-process alignShard {
-    tag "${r1.getBaseName()}"
-
-    input:
-    tuple val("shards"), path(r1), path(r2)
-
-    output:
-    path("*.bam")
-
+    cpus 64
+    memory '256 GB'
+    time '14d'
     container '/mnt/mohammadi/home/kganapathy/tyckolab_asm/asm.sif'
 
     script:
@@ -313,37 +281,10 @@ process alignShard {
         --multicore ${params.threads_bismark} \\
         -o .
 
-    idx=\$(basename ${r1} | sed 's/.*shard_\\([0-9]*\\).R1.*/\\1/')
-    mv *_bismark_bt2_pe.bam shard_\${idx}_bismark_bt2_pe.bam
+    mv *_bismark_bt2_pe.bam aligned.bam
     """
 }
 
-process mergeBams {
-    tag "merge"
-
-    input:
-    tuple val(dummy), path(bam_files)
-
-    output:
-    path("merged.bam")
-
-    container '/mnt/stsi/stsi4/ASM/samtools/samtools_v1.9-4-deb_cv1.sif'
-
-    script:
-    def bamPaths = bam_files.collect { it.getName() }
-    def bamString = bamPaths.join(' ')
-
-    return """
-    set -euxo pipefail
-
-    if [ ${bamPaths.size()} -eq 1 ]; then
-        echo "Only one BAM — copying"
-        cat "${bamPaths[0]}" > merged.bam
-    else
-        /usr/bin/samtools merge -@ ${params.threads_samtools} merged.bam ${bamString}
-    fi
-    """
-}
 
 process sortAndIndex {
     tag "sort"
